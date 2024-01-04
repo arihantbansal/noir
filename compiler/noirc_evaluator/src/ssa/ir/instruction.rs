@@ -533,16 +533,51 @@ impl Instruction {
                     let truncated = numeric_constant.to_u128() % integer_modulus;
                     SimplifiedTo(dfg.make_constant(truncated.into(), typ))
                 } else if let Value::Instruction { instruction, .. } = &dfg[dfg.resolve(*value)] {
-                    if let Instruction::Truncate { bit_size: src_bit_size, .. } = &dfg[*instruction]
-                    {
-                        // If we're truncating the value to fit into the same or larger bit size then this is a noop.
-                        if src_bit_size <= bit_size && src_bit_size <= max_bit_size {
-                            SimplifiedTo(*value)
-                        } else {
-                            None
+                    match &dfg[*instruction] {
+                        Instruction::Truncate { bit_size: src_bit_size, .. } => {
+                            // If we're truncating the value to fit into the same or larger bit size then this is a noop.
+                            if src_bit_size <= bit_size && src_bit_size <= max_bit_size {
+                                SimplifiedTo(*value)
+                            } else {
+                                None
+                            }
                         }
-                    } else {
-                        None
+
+                        Instruction::Binary(Binary {
+                            lhs, rhs, operator: BinaryOp::Div, ..
+                        }) if dfg.is_constant(*rhs) => {
+                            // If we're truncating the result of a division by a constant denominator, we can
+                            // reason about the maximum bit size of the result and whether a truncation is necessary.
+                            fn get_type_size(typ: &Type) -> u32 {
+                                match typ {
+                                    Type::Numeric(NumericType::NativeField) => {
+                                        FieldElement::max_num_bits()
+                                    }
+                                    Type::Numeric(
+                                        NumericType::Unsigned { bit_size }
+                                        | NumericType::Signed { bit_size },
+                                    ) => *bit_size,
+                                    _ => unreachable!("Should only be called with primitive types"),
+                                }
+                            }
+
+                            let numerator_type = dfg.type_of_value(*lhs);
+                            let divisor = dfg
+                                .get_numeric_constant(*rhs)
+                                .expect("rhs is checked to be constant.");
+
+                            let divisor_bits = divisor.num_bits();
+                            let max_numerator_bits = get_type_size(&numerator_type);
+
+                            let max_quotient_bits = max_numerator_bits - divisor_bits + 1;
+                            if max_quotient_bits <= *bit_size {
+                                SimplifiedTo(*value)
+                            } else {
+                                None
+                            }
+                        }
+
+                        _ => None,
                     }
                 } else {
                     None
